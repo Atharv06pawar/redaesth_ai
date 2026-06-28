@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redaesth-ai"
+version = "0.1.0"
+description = "Memory-first AI coaching system for RedAesth."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "accelerate>=1.8",
+  "alembic>=1.16",
+  "anthropic>=0.57",
+  "arxiv>=2.2",
+  "chromadb>=1.1",
+  "datasets>=4.0",
+  "datasketch>=1.6",
+  "huggingface-hub>=0.34",
+  "httpx>=0.28",
+  "numpy>=2.3",
+  "openai>=1.95",
+  "pandas>=2.3",
+  "pydantic>=2.11",
+  "pydantic-settings>=2.10",
+  "python-dotenv>=1.1",
+  "pyyaml>=6.0",
+  "rank-bm25>=0.2",
+  "rich>=14.0",
+  "scikit-learn>=1.7",
+  "sentence-transformers>=5.0",
+  "sqlalchemy>=2.0",
+  "tabulate>=0.9",
+  "tenacity>=9.1",
+  "tqdm>=4.67",
+  "transformers>=4.53",
+  "typer>=0.16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.16",
+  "pytest>=8.4",
+  "pytest-cov>=6.2",
+  "ruff>=0.12",
+]
+
+[project.scripts]
+redaesth = "redaesth_ai.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["memory/tests", "retrieval/tests", "prompts/tests", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+strict_optional = true

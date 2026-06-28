@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Runtime artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.jsonl
+*.parquet
+*.feather
+
+# Large or generated data
+data/raw/**
+!data/raw/README.md
+data/cleaned/**
+!data/cleaned/README.md
+data/scored/**
+!data/scored/README.md
+data/synthetic/**
+!data/synthetic/README.md
+!data/synthetic/validated/README.md
+data/retrieval_corpus/**
+!data/retrieval_corpus/README.md
+!data/retrieval_corpus/documents/README.md
+data/final/**
+!data/final/README.md
+!data/README.md
+research/model_comparison/reports/**
+!research/model_comparison/reports/README.md
+research/dataset_discovery/reports/**
+!research/dataset_discovery/reports/README.md
+research/literature/summaries/**
+!research/literature/summaries/README.md
+evaluation/reports/**
+!evaluation/reports/README.md
+training/checkpoints/**
+!training/checkpoints/README.md
+
+# Local notebooks and editor state
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Preserved preexisting corpus state
+legacy/
