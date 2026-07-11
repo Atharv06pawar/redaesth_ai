@@ -88,6 +88,13 @@ def write_json_file(path: Path, payload: Any) -> Path:
     return path
 
 
+def count_jsonl_records(path: Path) -> int:
+    """Count non-empty JSONL records in a file."""
+
+    with path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
 def dataset_storage_name(dataset_id: str) -> str:
     """Convert a dataset identifier into a stable directory name."""
 
@@ -126,6 +133,28 @@ def sha256_for_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def build_manifest_file_record(
+    path: Path,
+    *,
+    relative_to: Path | None = None,
+    sample_count: int | None = None,
+) -> dict[str, Any]:
+    """Build a generic manifest record for a local artifact."""
+
+    record = {
+        "path": (
+            str(path.relative_to(relative_to)).replace("\\", "/")
+            if relative_to is not None
+            else str(path)
+        ),
+        "size_bytes": path.stat().st_size,
+        "sha256": sha256_for_file(path),
+    }
+    if sample_count is not None:
+        record["sample_count"] = sample_count
+    return record
 
 
 def collect_file_manifest(root: Path) -> list[DownloadedFile]:

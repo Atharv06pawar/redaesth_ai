@@ -35,6 +35,9 @@ This repository was initialized inside `D:\data`, which already contained collec
 - `python -m redaesth_ai.cli bootstrap`
 - `python -m redaesth_ai.cli research`
 - `python pipeline/download.py`
+- `python pipeline/clean.py`
+- `python pipeline/score.py`
+- `python pipeline/build_final_dataset.py`
 - `python -m redaesth_ai.cli full-pipeline`
 
 The shared CLI is implemented in `src/redaesth_ai/`, while new reusable Phase 2 runtime code is landing in `src/redaesth/` and phase-specific scripts remain at the top-level paths required by the specification.

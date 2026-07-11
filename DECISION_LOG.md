@@ -62,3 +62,39 @@
 **Justification:** A deterministic raw-data manifest turns the approved research output into a concrete, reusable pipeline input. Computing local checksums immediately gives later cleaning and dataset-card steps stable provenance while keeping the first acquisition stage simple and offline-inspectable.
 **Impact:** The repository now has a real Phase 2 data-pipeline entrypoint, and subsequent cleaning, scoring, and final assembly stages can build against a stable raw-data contract instead of querying research artifacts directly.
 ---
+
+## Decision 8: Keep `HuggingFaceTB/SmolLM2-1.7B-Instruct` locked for final assembly and the first calibration LoRA run
+**Date:** 2026-07-04T23:26:00+05:30
+**Phase:** Phase 2 - Final Dataset and Training Readiness
+**Decision:** Respect the existing formal base-model selection, keep `HuggingFaceTB/SmolLM2-1.7B-Instruct` as the locked base model, and render the final dataset's `text` field with the tokenizer's official Hugging Face chat template.
+**Alternatives Considered:** `Qwen/Qwen3-1.7B`; `google/gemma-3-1b-it`; invent a repository-local chat template instead of using the tokenizer config.
+**Justification:** The project already contained a formal model-selection decision, so this readiness pass should not override it casually. SmolLM2 remains a strong fit against the repository's original criteria: competitive instruction-following at sub-2B scale, a simple English-friendly chat template, and comfortable QLoRA fit on Kaggle T4 hardware at rank 16 and alpha 32. Using the tokenizer's own template removes formatting ambiguity from the locked artifact.
+**Impact:** `data/final/final_dataset.jsonl` now stores tokenizer-ready `text` samples with the exact `<|im_start|>...<|im_end|>` format expected by the selected model, and the spot-check validator uses the same tokenizer contract.
+---
+
+## Decision 9: Freeze the first training package as `NO GO` pending upstream data fixes
+**Date:** 2026-07-04T23:26:00+05:30
+**Phase:** Phase 2 - Final Dataset and Training Readiness
+**Decision:** Lock the assembled artifact and hashed source-stratified splits, but mark the repository `NO GO` for the first calibration LoRA run until upstream data curation resolves the measured domain-purity and exact-duplicate blockers.
+**Alternatives Considered:** Issue a `GO` despite failing audit metrics; silently rebalance or deduplicate during this assembly pass; alter scoring or balancing logic to force the audit to pass.
+**Justification:** The final artifact is technically loadable and the splits are deterministic, but the composition audit found two material blockers: `mental-health-adjacent` content reached `66.54%` of the corpus against a configured `35%` ceiling, and the preserved `normalized_sha256` field exposed a `37.77%` exact-duplicate rate. This pass was explicitly limited to assembly and readiness work, so the honest outcome is to document the blockers rather than mutate upstream curation logic. The recommended Kaggle training command also requires notebook-level `peft`, `bitsandbytes`, and `trl` installs because the repository still does not contain an in-repo LoRA trainer entrypoint.
+**Impact:** The repository now has a locked final artifact at `data/final/final_dataset.jsonl`, hashed `train.jsonl` / `val.jsonl` / `test.jsonl` splits, and a completed `TRAINING_READINESS_REPORT.md`, but Technical Director review should hold training until upstream dataset purity and deduplication are corrected.
+---
+
+## Decision 10: Define synthetic-data quality before building any generator
+**Date:** 2026-07-10T23:16:00+05:30
+**Phase:** Phase 3 - Synthetic Dataset Specification
+**Decision:** Implement the synthetic coaching milestone as a specification-first framework with typed schemas, persona and scenario libraries, a memory-usage contract, deterministic validators, and a PASS / FAIL quality rubric before generating any synthetic conversations.
+**Alternatives Considered:** Start generating synthetic conversations immediately; rely on prompt instructions without typed contracts; treat synthetic validation as a manual review task.
+**Justification:** The repository's previous training-readiness audit showed that dataset composition and quality need explicit contracts rather than optimistic assumptions. A schema-first synthetic framework lets future generators target one stable definition of a good coaching conversation, reuse the real-data scoring and coaching-eval heuristics already present in the codebase, and reject low-quality samples deterministically before they contaminate the primary LoRA corpus.
+**Impact:** The repository now includes `synthetic_schema.py`, `synthetic_personas.py`, `synthetic_scenarios.py`, `synthetic_memory.py`, `synthetic_validation.py`, `synthetic_rubric.py`, `SYNTHETIC_DATASET_SPECIFICATION.md`, and a dedicated unittest surface. No synthetic conversations are generated in this milestone; the repo is now ready for the next step of controlled synthetic generation against this contract.
+---
+
+## Decision 11: Generate the first synthetic pilot deterministically and fail closed on rubric failures
+**Date:** 2026-07-11T23:13:10+05:30
+**Phase:** Phase 3 - Synthetic Conversation Generation Pilot
+**Decision:** Build the first production synthetic-conversation generator as a deterministic composition layer over the existing schema, persona library, scenario library, memory specification, quality validators, and rubric. Export only rubric-passing samples in the locked SmolLM2 training-record schema, with the pilot explicitly capped at 100 conversations.
+**Alternatives Considered:** Generate free-form random chat; bypass validators and review samples manually; introduce a new data schema or a separate tokenizer formatter.
+**Justification:** The synthetic framework already establishes the behavioral contract, so the smallest reliable implementation is to generate typed candidates from those existing components and reject any failing candidate automatically. Reusing `build_training_record` preserves the established JSONL contract, while the local SmolLM2 adapter implements the already locked `<|im_start|>...<|im_end|>` tokenizer format offline and deterministically.
+**Impact:** `pipeline/generate_synthetic.py` now emits exactly 100 validated pilot records at `data/synthetic/validated/synthetic_coaching_pilot.jsonl` and `SYNTHETIC_GENERATION_REPORT.md`. The completed run accepted all 100 candidates with no rejections; scale-up remains out of scope until engineering review.
+---

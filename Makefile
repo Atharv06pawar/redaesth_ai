@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: install bootstrap status research model-eval download test lint smoke pipeline train eval clean
+.PHONY: install bootstrap status research model-eval download clean-dataset score-dataset build-final-dataset test lint smoke pipeline train eval clean
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -20,6 +20,15 @@ model-eval:
 download:
 	$(PYTHON) pipeline/download.py
 
+clean-dataset:
+	$(PYTHON) pipeline/clean.py
+
+score-dataset:
+	$(PYTHON) pipeline/score.py
+
+build-final-dataset:
+	$(PYTHON) pipeline/build_final_dataset.py
+
 test:
 	$(PYTHON) -m pytest
 
@@ -31,6 +40,9 @@ smoke:
 
 pipeline:
 	$(PYTHON) pipeline/download.py
+	$(PYTHON) pipeline/clean.py
+	$(PYTHON) pipeline/score.py
+	$(PYTHON) pipeline/build_final_dataset.py
 
 train:
 	$(PYTHON) training/train.py --smoke-test

@@ -119,3 +119,146 @@ Build a memory-first AI coaching system whose engineering choices are optimized 
 ### Next step
 
 - Build the cleaning stage against `data/raw/raw_data_manifest.json`, keeping the raw dataset snapshot as the stable handoff between research and data preparation.
+
+## Milestone 6: Locked final dataset assembly and readiness audit
+**Date:** 2026-07-04T23:26:00+05:30
+
+### Assembly findings
+
+- The final assembly stage now emits a single locked artifact at `data/final/final_dataset.jsonl` with one JSONL sample per line.
+- Each sample includes the required training fields: `text`, `source_id`, `language`, and `domain`, while preserving provenance and audit metadata such as `dataset_id`, `topic_tags`, `overall_quality_score`, and `normalized_sha256`.
+- The `text` field is rendered with the official `HuggingFaceTB/SmolLM2-1.7B-Instruct` tokenizer chat template rather than a hand-rolled formatter. The verified template prepends the model's default system message and wraps each turn in `<|im_start|>...<|im_end|>` markers.
+
+### Locked artifact and split results
+
+- Final assembled corpus: `27,181` samples
+- Train split: `24,463` samples
+- Val split: `1,359` samples
+- Test split: `1,359` samples
+- Final artifact SHA-256: `fcceade07717dcc2223f5fc977105fb06e104fedf9c4bd725f48cd5b7bad7722`
+- Train SHA-256: `8e1369d33675ad4f7010e2489b297edfdbdb46051c765142b34cd4f11befe640`
+- Val SHA-256: `7fe8cae6e5fdcd8bf46afd0a3fefdc1cb484e5447cf6b64b687152ed0929bf55`
+- Test SHA-256: `fcc6e73b149bc922d368f082763e0538494d92926c670131e00084b650c8765b`
+
+### Composition audit
+
+- Language distribution from existing pipeline labels:
+  - `mostly_ascii`: `66.37%`
+  - `majority_non_ascii`: `33.63%`
+- Domain distribution from preserved source/topic metadata:
+  - `fitness-coaching-adjacent`: `33.46%`
+  - `mental-health-adjacent`: `66.54%`
+  - `off-domain`: `0.00%`
+- Source contribution:
+  - `hizardev/MentalHealth-Counseling`: `66.37%`
+  - `ulysses531/fitness-conversation-dataset`: `33.63%`
+- Exact duplicate rate from preserved `normalized_sha256`: `37.77%`
+
+### Spot-check validation
+
+- Tokenizer validation sample size: `50`
+- Malformed samples: `0`
+- Samples exceeding `2048` tokens: `0`
+- Truncation rate at `2048` tokens: `0.00%`
+- Average observed token length in the spot check: `450.22`
+- Maximum observed token length in the spot check: `1263`
+
+### Readiness outcome
+
+- Overall decision: `NO GO`
+- Blocking metric 1: `mental-health-adjacent` share exceeded the configured `35%` ceiling by reaching `66.54%`
+- Blocking metric 2: exact duplicate rate was `37.77%`, showing that upstream deduplication remains incomplete
+- The split artifact itself is healthy and deterministic, but the current corpus composition is not yet suitable for the first calibration LoRA run
+
+### Operational note
+
+- The recommended Kaggle training entrypoint in `TRAINING_READINESS_REPORT.md` uses notebook-local installs of `peft`, `bitsandbytes`, and `trl`. Those dependencies were not added to the repository during this data-readiness pass because the task was limited to final assembly and readiness review rather than training-system implementation.
+
+## Milestone 7: Synthetic coaching quality contract
+**Date:** 2026-07-10T23:16:00+05:30
+
+### Objective
+
+- Define exactly what a valid synthetic RedAesth coaching conversation looks like before any generator or prompt-template work begins.
+
+### Infrastructure completed
+
+- Added a typed schema in `src/redaesth/synthetic_schema.py` for personas, user profiles, goals, scenarios, memory references, response contracts, and full synthetic conversations.
+- Added a structured persona library in `src/redaesth/synthetic_personas.py` covering students, busy professionals, new parents, travelers, shift workers, retirees, body-recomposition users, competition-prep users, and return-after-break cases.
+- Added a structured scenario library in `src/redaesth/synthetic_scenarios.py` covering beginner onboarding, fat loss, muscle gain, plateaus, missed workouts, injury recovery, poor sleep, exam stress, travel, busy professionals, returning after a break, and competition preparation.
+- Added a memory-specification layer in `src/redaesth/synthetic_memory.py` that builds on the existing memory engine without modifying it, including creation, ignore, retrieval, adaptation, invalid-usage, and expiration rules.
+- Added a deterministic validator suite plus rubric in `src/redaesth/synthetic_validation.py` and `src/redaesth/synthetic_rubric.py`, reusing the established coaching-eval and real-data scoring heuristics for empathy, coaching quality, specificity, memory usage, safety, and repetition.
+- Added the operator-facing specification document `SYNTHETIC_DATASET_SPECIFICATION.md`.
+
+### Validation completed
+
+- Added new offline tests for:
+  - schema validation
+  - persona validation
+  - scenario validation
+  - memory-spec validation
+  - validator behavior
+  - quality-rubric PASS / FAIL outcomes
+- Full repository validation passes:
+  - `44` unit tests
+  - `python -m redaesth_ai.cli smoke-test`
+
+### Quality contract summary
+
+- Synthetic conversations are now required to pass named thresholds for:
+  - empathy
+  - coaching quality
+  - personalization
+  - behavioral adaptation
+  - scientific consistency
+  - long-term memory usage
+  - follow-up questioning
+  - hallucination safety
+  - repetition control
+  - scenario consistency
+- Future generators must create structured conversations first and may only emit training data after those samples pass the deterministic rubric.
+
+### Boundary of this milestone
+
+- No synthetic conversations were generated.
+- No prompt templates were implemented.
+- No training, retrieval, or memory-engine redesign work was started.
+- The repository is now ready for the next milestone: controlled synthetic conversation generation against the new contract.
+
+## Milestone 8: Deterministic synthetic conversation generation pilot
+**Date:** 2026-07-11T23:13:10+05:30
+
+### Objective
+
+- Produce the first production-ready synthetic coaching pilot from the completed typed framework, without changing the real-data, memory-engine, retrieval, or training subsystems.
+
+### Infrastructure completed
+
+- Added `src/redaesth/synthetic_generator.py`, which composes typed personas, scenarios, goals, profile snapshots, conversation history, memory references, behavioral adaptations, and coaching responses into `SyntheticCoachingConversation` objects.
+- Integrated every candidate with the existing synthetic validators and quality rubric. The generator fails closed if it cannot reach the configured accepted count.
+- Reused `build_training_record` from final assembly for the established training JSONL schema, plus an offline SmolLM2 chat-template adapter that produces the locked `<|im_start|>...<|im_end|>` format.
+- Added `pipeline/generate_synthetic.py` as the deterministic executable entrypoint and typed configuration for the pilot count, generation seed, JSONL path, and report path.
+- Added generator unit coverage for deterministic output, typed-conversation validity, validator and memory integration, locked JSONL export, and the exact configured pilot size.
+
+### Pilot results
+
+- Generated candidates: `100`
+- Accepted: `100`
+- Rejected: `0`
+- Acceptance rate: `100.00%`
+- JSONL artifact: `data/synthetic/validated/synthetic_coaching_pilot.jsonl`
+- Report artifact: `SYNTHETIC_GENERATION_REPORT.md`
+- Average conversation length: `3.86` messages
+- Average coach-response length: `984.88` characters
+- All exported conversations passed every named synthetic validator and the aggregate rubric.
+
+### Validation completed
+
+- `48` unit tests pass, including the new synthetic generator suite.
+- `python -m redaesth_ai.cli smoke-test` passes.
+- `python -m compileall src tests pipeline redaesth` passes.
+
+### Boundary of this milestone
+
+- The pilot is intentionally limited to 100 validated conversations for engineering review.
+- No synthetic-corpus scale-up, model training, Kaggle workflow, retrieval change, or memory-engine change was started.

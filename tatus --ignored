@@ -1,0 +1,38 @@
+warning: in the working copy of '.env.example', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/.env.example b/.env.example[m
+[1mindex 09246e3..adbb9c6 100644[m
+[1m--- a/.env.example[m
+[1m+++ b/.env.example[m
+[36m@@ -34,9 +34,17 @@[m [mREDAESTH_DATA_DIR=data[m
+ REDAESTH_RAW_DATA_DIR=data\raw[m
+ REDAESTH_RAW_DATA_MANIFEST_PATH=data\raw\raw_data_manifest.json[m
+ REDAESTH_CLEANED_DATA_DIR=data\cleaned[m
+[32m+[m[32mREDAESTH_CLEANED_DATASET_PATH=data\cleaned\cleaned_dataset.jsonl[m
+[32m+[m[32mREDAESTH_CLEANING_REPORT_PATH=data\cleaned\cleaning_report.json[m
+ REDAESTH_SCORED_DATA_DIR=data\scored[m
+[32m+[m[32mREDAESTH_SCORED_DATASET_PATH=data\scored\scored_dataset.jsonl[m
+[32m+[m[32mREDAESTH_SCORING_REPORT_PATH=data\scored\scoring_report.json[m
+ REDAESTH_SYNTHETIC_DATA_DIR=data\synthetic[m
+ REDAESTH_FINAL_DATA_DIR=data\final[m
+[32m+[m[32mREDAESTH_FINAL_TRAIN_PATH=data\final\train.jsonl[m
+[32m+[m[32mREDAESTH_FINAL_VALIDATION_PATH=data\final\validation.jsonl[m
+[32m+[m[32mREDAESTH_FINAL_TEST_PATH=data\final\test.jsonl[m
+[32m+[m[32mREDAESTH_FINAL_DATASET_CARD_PATH=data\final\dataset_card.md[m
+ REDAESTH_RETRIEVAL_CORPUS_DIR=data\retrieval_corpus[m
+ REDAESTH_CHECKPOINT_DIR=training\checkpoints[m
+ REDAESTH_EVALUATION_OUTPUT_DIR=evaluation\reports[m
+[36m@@ -55,6 +63,14 @@[m [mREDAESTH_VECTOR_DB_PATH=data\vector_store[m
+ REDAESTH_SYNTHETIC_TARGET_COUNT=8000[m
+ REDAESTH_SYNTHETIC_QUALITY_THRESHOLD=0.75[m
+ REDAESTH_GENERATION_BATCH_SIZE=20[m
+[32m+[m[32mREDAESTH_MINIMUM_TRAINING_QUALITY_SCORE=0.55[m
+[32m+[m[32mREDAESTH_MINIMUM_DOMAIN_RELEVANCE_SCORE=0.50[m
+[32m+[m[32mREDAESTH_FINAL_VALIDATION_RATIO=0.05[m
+[32m+[m[32mREDAESTH_FINAL_TEST_RATIO=0.05[m
+[32m+[m[32mREDAESTH_FINAL_MIN_TRAIN_EXAMPLES=10000[m
+[32m+[m[32mREDAESTH_FINAL_MIN_VALIDATION_EXAMPLES=500[m
+[32m+[m[32mREDAESTH_FINAL_MIN_TEST_EXAMPLES=500[m
+[32m+[m[32mREDAESTH_MAX_EMOTIONAL_SUPPORT_SHARE=0.35[m
+ [m
+ # Logging[m
+ REDAESTH_LOG_LEVEL=INFO[m
