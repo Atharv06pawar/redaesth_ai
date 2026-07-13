@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
+from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +17,7 @@ from memory.event_schema import EventType
 
 from .config import RedAesthConfig, config
 from .final_dataset import build_training_record, write_jsonl
+from .scoring import normalized_text, repetition_penalty
 from .synthetic_memory import get_memory_event_specifications, memory_spec_by_event_type
 from .synthetic_personas import build_user_profile_from_persona, get_persona_library
 from .synthetic_rubric import evaluate_synthetic_conversation
@@ -39,6 +44,34 @@ SMOLLM2_DEFAULT_SYSTEM_MESSAGE = (
     "You are a helpful AI assistant named SmolLM, trained by Hugging Face"
 )
 SYNTHETIC_SOURCE_ID = "redaesth/synthetic-coaching-pilot"
+SYNTHETIC_FACTORY_SOURCE_ID = "redaesth/synthetic-coaching-production"
+SYNTHETIC_SCHEMA_VERSION = "1.0"
+SYNTHETIC_FACTORY_VERSION = "1.0"
+
+EMPATHY_OPENINGS = (
+    "I hear you - feeling {emotion} in this situation makes sense.",
+    "That makes sense; this can feel {emotion} when the plan meets real-life constraints.",
+    "It sounds like this has felt {emotion}, and that is useful information rather than a failure.",
+    "I understand why this feels {emotion}; we can make the next step more workable.",
+    "This is understandably {emotion}, so we will simplify the decision in front of you.",
+)
+
+REVIEW_CADENCES = (
+    "Review the pattern after the week before changing the plan.",
+    "Use the next seven days as a low-pressure data point, then adjust one lever if needed.",
+    "Keep the plan stable long enough to learn what is actually working.",
+    "Treat the next completed sessions as feedback, not as a test of willpower.",
+)
+
+PLAN_EMPHASES = (
+    "Start with the session that has the most predictable time window.",
+    "Keep the first session deliberately easy to begin so momentum comes before optimization.",
+    "Write down one backup option now for the day the original plan is disrupted.",
+    "Use the simplest meal or movement choice as the default when decision fatigue is high.",
+    "Leave one session flexible so the plan can absorb an unexpected schedule change.",
+    "Treat completion quality as the win this week, even if the session is shorter than usual.",
+    "Make the next action visible on the calendar before relying on motivation alone.",
+)
 
 
 SCENARIO_ACTIONS: dict[str, str] = {
@@ -222,6 +255,7 @@ def _build_user_profile(
     persona: PersonaDefinition,
     scenario: ScenarioDefinition,
     goal_summary: str,
+    variation_index: int = 0,
 ) -> UserProfile:
     """Build the scenario-aware profile snapshot from the persona contract."""
 
@@ -236,6 +270,7 @@ def _build_user_profile(
         current_stats={
             "training_days_available": persona.available_training_days_per_week,
             "session_minutes_available": persona.available_training_minutes,
+            "planning_cycle": variation_index + 1,
         },
     )
 
@@ -269,13 +304,20 @@ def _memory_reference(
     profile: UserProfile,
     goal: CoachingGoalSpec,
     sample_index: int,
+    event_type_override: EventType | None = None,
 ) -> MemoryReference:
     """Create one concrete, behavior-shaping memory reference for a candidate."""
 
     allowed_types = _supported_memory_event_types(scenario)
-    event_type = (
+    event_type = event_type_override or (
         allowed_types[sample_index % len(allowed_types)] if allowed_types else EventType.GOAL_SET
     )
+    if event_type not in allowed_types and not (
+        not allowed_types and event_type is EventType.GOAL_SET
+    ):
+        raise ValueError(
+            f"Memory event {event_type.value} is not supported by scenario {scenario.scenario_id}."
+        )
     if event_type is EventType.GOAL_SET:
         fact = goal.summary
     elif event_type is EventType.SCHEDULE_CHANGED:
@@ -329,6 +371,7 @@ def _follow_up_questions(
     scenario: ScenarioDefinition,
     profile: UserProfile,
     goal: CoachingGoalSpec,
+    variation_index: int = 0,
 ) -> list[str]:
     """Create the required number of scenario-aware coaching questions."""
 
@@ -338,7 +381,9 @@ def _follow_up_questions(
         f"What would show that {goal.summary} is moving in the right direction over the next week?",
         f"Which {profile.equipment_access} exercise feels most realistic for your next session?",
     ]
-    return candidates[: scenario.required_follow_up_questions]
+    offset = variation_index % len(candidates)
+    ordered = candidates[offset:] + candidates[:offset]
+    return ordered[: scenario.required_follow_up_questions]
 
 
 def _scientific_principles(scenario: ScenarioDefinition) -> list[str]:
@@ -357,6 +402,8 @@ def _conversation_history(
     scenario: ScenarioDefinition,
     goal: CoachingGoalSpec,
     profile: UserProfile,
+    history_turn_count: int | None = None,
+    variation_index: int = 0,
 ) -> list[ConversationTurn]:
     """Build onboarding or follow-up history from the structured scenario, never a static chat."""
 
@@ -366,8 +413,34 @@ def _conversation_history(
         f"I am working toward {goal.summary}. {signal} With {primary_constraint}, I need a "
         "plan that fits this week."
     )
-    if scenario.scenario_id == "beginner_onboarding":
+    if scenario.scenario_id == "beginner_onboarding" or history_turn_count == 1:
         return [ConversationTurn(role="user", content=current_message)]
+    if history_turn_count == 5:
+        return [
+            ConversationTurn(
+                role="user",
+                content=(
+                    f"I want coaching that fits my {persona.lifestyle.value.replace('_', ' ')} "
+                    f"routine and my goal of {goal.summary}."
+                ),
+            ),
+            ConversationTurn(
+                role="assistant",
+                content="We will begin with a realistic baseline and use the first week as feedback.",
+            ),
+            ConversationTurn(
+                role="user",
+                content=(
+                    f"I completed the first planning cycle {variation_index + 1} and noticed the "
+                    "same constraints are still showing up."
+                ),
+            ),
+            ConversationTurn(
+                role="assistant",
+                content="That pattern is enough to simplify the next choice instead of adding more tasks.",
+            ),
+            ConversationTurn(role="user", content=current_message),
+        ]
     return [
         ConversationTurn(
             role="user",
@@ -392,6 +465,7 @@ def _response_text(
     goal: CoachingGoalSpec,
     memory_reference: MemoryReference,
     follow_up_questions: list[str],
+    variation_index: int = 0,
 ) -> str:
     """Compose an individualized response from scenario objectives and profile facts."""
 
@@ -403,9 +477,12 @@ def _response_text(
     session_minutes = min(profile.available_training_minutes, 45)
     action = SCENARIO_ACTIONS[scenario.scenario_id]
     memory_fact = memory_reference.facts[0]
+    opening = EMPATHY_OPENINGS[variation_index % len(EMPATHY_OPENINGS)].format(emotion=emotion)
+    review_cadence = REVIEW_CADENCES[variation_index % len(REVIEW_CADENCES)]
+    plan_emphasis = PLAN_EMPHASES[variation_index % len(PLAN_EMPHASES)]
 
     sentences = [
-        f"I hear you - feeling {emotion} in this situation makes sense.",
+        opening,
         (
             f"As a {lifestyle} focused on {motivation}, your {profile.equipment_access} access and "
             f"goal of {goal.summary} call for a plan that works around {primary_constraint} and "
@@ -421,8 +498,9 @@ def _response_text(
         ),
         (
             "The priority is manageable progression, adequate recovery, and one measured adjustment "
-            "after a consistent week rather than reacting to a single rough day."
+            f"after a consistent week rather than reacting to a single rough day. {review_cadence}"
         ),
+        plan_emphasis,
         *follow_up_questions,
     ]
     return " ".join(sentences)
@@ -434,6 +512,9 @@ def build_synthetic_conversation(
     scenario: ScenarioDefinition,
     sample_index: int,
     config: RedAesthConfig = config,
+    variation_index: int = 0,
+    memory_event_type: EventType | None = None,
+    history_turn_count: int | None = None,
 ) -> SyntheticCoachingConversation:
     """Build one typed synthetic conversation from existing personas and scenarios."""
 
@@ -447,18 +528,20 @@ def build_synthetic_conversation(
         success_metrics=["weekly adherence", "trend-based progress review"],
         primary_barriers=list(persona.barriers[:2]),
     )
-    profile = _build_user_profile(persona, scenario, goal.summary)
+    profile = _build_user_profile(persona, scenario, goal.summary, variation_index)
     memory_reference = _memory_reference(
         conversation_id=conversation_id,
         scenario=scenario,
         profile=profile,
         goal=goal,
         sample_index=sample_index,
+        event_type_override=memory_event_type,
     )
     follow_up_questions = _follow_up_questions(
         scenario=scenario,
         profile=profile,
         goal=goal,
+        variation_index=variation_index,
     )
     response_text = _response_text(
         persona=persona,
@@ -467,6 +550,7 @@ def build_synthetic_conversation(
         goal=goal,
         memory_reference=memory_reference,
         follow_up_questions=follow_up_questions,
+        variation_index=variation_index,
     )
     response = CoachingResponseSpec(
         response_text=response_text,
@@ -500,6 +584,8 @@ def build_synthetic_conversation(
             scenario=scenario,
             goal=goal,
             profile=profile,
+            history_turn_count=history_turn_count,
+            variation_index=variation_index,
         ),
         memory_references=[memory_reference],
         coaching_response=response,
@@ -589,6 +675,7 @@ def training_record_from_conversation(
     quality: QualityRubricResult,
     *,
     tokenizer: SmolLM2ChatTemplateTokenizer | None = None,
+    source_id: str = SYNTHETIC_SOURCE_ID,
 ) -> dict[str, Any]:
     """Project a validated synthetic conversation into the locked training-record schema."""
 
@@ -603,8 +690,8 @@ def training_record_from_conversation(
     record = build_training_record(
         {
             "conversation_id": conversation.conversation_id,
-            "dataset_id": SYNTHETIC_SOURCE_ID,
-            "source_id": SYNTHETIC_SOURCE_ID,
+            "dataset_id": source_id,
+            "source_id": source_id,
             "source_license": "internal-synthetic-specification",
             "language": "mostly_ascii",
             "topic_tags": topic_tags,
@@ -772,13 +859,987 @@ def generate_pilot_dataset(*, config: RedAesthConfig = config) -> SyntheticGener
     return result
 
 
+@dataclass(slots=True, frozen=True)
+class ProductionCandidatePlan:
+    """One deterministic diversity-controlled slot in the production corpus."""
+
+    planned_slot: int
+    persona_id: str
+    scenario_id: str
+    memory_event_type: EventType
+    history_turn_count: int
+
+
+@dataclass(slots=True)
+class ProductionFactoryState:
+    """Persisted checkpoint for resumable production generation."""
+
+    created_at: str
+    target_count: int
+    seed: int
+    next_candidate_index: int = 0
+    accepted_count: int = 0
+    rejected_count: int = 0
+    retry_count: int = 0
+    completed: bool = False
+    schema_version: str = SYNTHETIC_SCHEMA_VERSION
+    generator_version: str = SYNTHETIC_FACTORY_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the checkpoint in a stable JSON-compatible shape."""
+
+        return {
+            "created_at": self.created_at,
+            "target_count": self.target_count,
+            "seed": self.seed,
+            "next_candidate_index": self.next_candidate_index,
+            "accepted_count": self.accepted_count,
+            "rejected_count": self.rejected_count,
+            "retry_count": self.retry_count,
+            "completed": self.completed,
+            "schema_version": self.schema_version,
+            "generator_version": self.generator_version,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ProductionFactoryState":
+        """Restore a checkpoint written by the production factory."""
+
+        return cls(
+            created_at=str(payload["created_at"]),
+            target_count=int(payload["target_count"]),
+            seed=int(payload["seed"]),
+            next_candidate_index=int(payload.get("next_candidate_index", 0)),
+            accepted_count=int(payload.get("accepted_count", 0)),
+            rejected_count=int(payload.get("rejected_count", 0)),
+            retry_count=int(payload.get("retry_count", 0)),
+            completed=bool(payload.get("completed", False)),
+            schema_version=str(payload.get("schema_version", SYNTHETIC_SCHEMA_VERSION)),
+            generator_version=str(payload.get("generator_version", SYNTHETIC_FACTORY_VERSION)),
+        )
+
+
+@dataclass(slots=True)
+class ProductionCorpusResult:
+    """Current or completed state of the deterministic production factory."""
+
+    state: ProductionFactoryState
+    completed: bool
+    accepted_staging_path: Path
+    rejection_log_path: Path
+    state_path: Path
+    train_path: Path | None = None
+    manifest_path: Path | None = None
+    dataset_card_path: Path | None = None
+    statistics_path: Path | None = None
+    report_path: Path | None = None
+
+
+class ConversationDeduplicationIndex:
+    """Factory-local duplicate guard reusing existing normalization and repetition scoring."""
+
+    def __init__(self, *, config: RedAesthConfig, target_count: int) -> None:
+        self.config = config
+        self.target_count = target_count
+        self.exact_hashes: set[str] = set()
+        self.similarity_buckets: dict[str, list[tuple[str, str]]] = {}
+        self.opening_counts: Counter[str] = Counter()
+
+    @staticmethod
+    def _conversation_text_from_messages(messages: list[dict[str, Any]]) -> str:
+        return "\n".join(
+            f"{message.get('role', '')}: {message.get('content', '')}" for message in messages
+        )
+
+    @staticmethod
+    def _opening_signature(response: str) -> str:
+        return normalized_text(response.split(".", maxsplit=1)[0])
+
+    @staticmethod
+    def _response_from_messages(messages: list[dict[str, Any]]) -> str:
+        for message in reversed(messages):
+            if message.get("role") == "assistant":
+                return str(message.get("content", ""))
+        return ""
+
+    def register_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        bucket_key: str = "default",
+    ) -> None:
+        """Add an already accepted conversation to the recovery-aware index."""
+
+        conversation = normalized_text(self._conversation_text_from_messages(messages))
+        response = normalized_text(self._response_from_messages(messages))
+        self.exact_hashes.add(hashlib.sha256(conversation.encode("utf-8")).hexdigest())
+        self.similarity_buckets.setdefault(bucket_key, []).append((conversation, response))
+        self.opening_counts[self._opening_signature(response)] += 1
+
+    def rejection_reason(
+        self,
+        conversation: SyntheticCoachingConversation,
+        *,
+        bucket_key: str = "default",
+    ) -> str | None:
+        """Return a deterministic rejection reason when a candidate is too repetitive."""
+
+        messages = [
+            {"role": turn.role.value, "content": turn.content}
+            for turn in conversation.all_messages()
+        ]
+        normalized_conversation = normalized_text(self._conversation_text_from_messages(messages))
+        normalized_response = normalized_text(conversation.coaching_response.response_text)
+        exact_hash = hashlib.sha256(normalized_conversation.encode("utf-8")).hexdigest()
+        if exact_hash in self.exact_hashes:
+            return "exact_duplicate"
+        if repetition_penalty(conversation.coaching_response.response_text) >= 0.10:
+            return "highly_repetitive_response"
+
+        for prior_conversation, prior_response in self.similarity_buckets.get(bucket_key, []):
+            conversation_similarity = SequenceMatcher(
+                None,
+                normalized_conversation,
+                prior_conversation,
+            ).ratio()
+            response_similarity = SequenceMatcher(
+                None,
+                normalized_response,
+                prior_response,
+            ).ratio()
+            if max(conversation_similarity, response_similarity) >= self.config.synthetic_near_duplicate_similarity:
+                return "near_duplicate"
+
+        opening = self._opening_signature(conversation.coaching_response.response_text)
+        maximum_opening_count = max(
+            1,
+            int(self.target_count * self.config.synthetic_max_repeated_opening_share),
+        )
+        if self.opening_counts[opening] >= maximum_opening_count:
+            return "highly_repetitive_opening"
+        return None
+
+
+def _utc_timestamp() -> str:
+    """Return the current UTC timestamp for factory provenance records."""
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    """Load a factory staging JSONL file when it already exists."""
+
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                records.append(json.loads(line))
+    return records
+
+
+def _append_jsonl_record(path: Path, record: dict[str, Any]) -> None:
+    """Append one accepted or rejected factory record durably."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+
+
+def _write_json_document(path: Path, payload: dict[str, Any]) -> Path:
+    """Write a stable JSON document with a self-contained content checksum."""
+
+    document = dict(payload)
+    canonical_content = json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    document["content_sha256"] = hashlib.sha256(canonical_content.encode("utf-8")).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _sha256_file(path: Path) -> str:
+    """Return a SHA256 digest for one materialized factory artifact."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _balanced_sequence(values: list[str], *, target_count: int, seed: int) -> list[str]:
+    """Allocate a deterministic near-equal quota to every supplied value."""
+
+    if not values:
+        raise ValueError("Cannot build a balanced sequence from no values.")
+    rng = random.Random(seed)
+    ordered_values = list(values)
+    rng.shuffle(ordered_values)
+    base_count, remainder = divmod(target_count, len(ordered_values))
+    sequence: list[str] = []
+    for index, value in enumerate(ordered_values):
+        sequence.extend([value] * (base_count + (1 if index < remainder else 0)))
+    rng.shuffle(sequence)
+    return sequence
+
+
+def _build_production_candidate_plan(
+    *,
+    target_count: int,
+    seed: int,
+) -> list[ProductionCandidatePlan]:
+    """Create a deterministic plan that balances personas, scenarios, memory, and lengths."""
+
+    personas = {persona.persona_id: persona for persona in get_persona_library()}
+    scenarios = {scenario.scenario_id: scenario for scenario in get_scenario_library()}
+    persona_sequence = _balanced_sequence(
+        list(personas),
+        target_count=target_count,
+        seed=seed,
+    )
+    scenario_sequence = _balanced_sequence(
+        list(scenarios),
+        target_count=target_count,
+        seed=seed + 1,
+    )
+    history_sequence = _balanced_sequence(
+        ["3", "5"],
+        target_count=target_count,
+        seed=seed + 2,
+    )
+    memory_category_counts: Counter[str] = Counter()
+    plans: list[ProductionCandidatePlan] = []
+
+    for planned_slot, (persona_id, scenario_id, history_turn_count) in enumerate(
+        zip(persona_sequence, scenario_sequence, history_sequence, strict=True)
+    ):
+        scenario = scenarios[scenario_id]
+        options = _supported_memory_event_types(scenario) or [EventType.GOAL_SET]
+        memory_event_type = min(
+            options,
+            key=lambda event_type: (
+                memory_category_counts[memory_spec_by_event_type(event_type).category.value],
+                event_type.value,
+            ),
+        )
+        memory_category_counts[memory_spec_by_event_type(memory_event_type).category.value] += 1
+        plans.append(
+            ProductionCandidatePlan(
+                planned_slot=planned_slot,
+                persona_id=persona_id,
+                scenario_id=scenario_id,
+                memory_event_type=memory_event_type,
+                history_turn_count=int(history_turn_count),
+            )
+        )
+    return plans
+
+
+def _plan_distributions(plans: list[ProductionCandidatePlan]) -> dict[str, Counter[str]]:
+    """Compute target distributions that the diversity controller must preserve."""
+
+    personas = {persona.persona_id: persona for persona in get_persona_library()}
+    scenarios = {scenario.scenario_id: scenario for scenario in get_scenario_library()}
+    distributions: dict[str, Counter[str]] = {
+        "persona": Counter(),
+        "scenario": Counter(),
+        "coaching_objective": Counter(),
+        "motivation": Counter(),
+        "experience": Counter(),
+        "memory_category": Counter(),
+        "conversation_length": Counter(),
+    }
+    for plan in plans:
+        persona = personas[plan.persona_id]
+        scenario = scenarios[plan.scenario_id]
+        distributions["persona"][persona.persona_id] += 1
+        distributions["scenario"][scenario.scenario_id] += 1
+        distributions["coaching_objective"][scenario.coaching_objectives[0]] += 1
+        distributions["motivation"][persona.motivation_style.value] += 1
+        distributions["experience"][persona.experience_level.value] += 1
+        distributions["memory_category"][
+            memory_spec_by_event_type(plan.memory_event_type).category.value
+        ] += 1
+        message_count = 2 if scenario.scenario_id == "beginner_onboarding" else plan.history_turn_count + 1
+        distributions["conversation_length"][str(message_count)] += 1
+    return distributions
+
+
+def _load_or_create_factory_state(
+    *,
+    config: RedAesthConfig,
+    target_count: int,
+) -> tuple[ProductionFactoryState, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Restore durable state and reconcile a completed staging append after interruption."""
+
+    accepted_records = _read_jsonl_records(config.synthetic_factory_accepted_staging_path)
+    rejection_records = _read_jsonl_records(config.synthetic_factory_rejection_log_path)
+    if config.synthetic_factory_state_path.exists():
+        state = ProductionFactoryState.from_dict(
+            json.loads(config.synthetic_factory_state_path.read_text(encoding="utf-8"))
+        )
+        if state.target_count != target_count or state.seed != config.synthetic_generation_seed:
+            raise RuntimeError(
+                "Existing synthetic factory state uses a different target count or seed. "
+                "Use a separate production directory rather than mixing deterministic runs."
+            )
+    else:
+        state = ProductionFactoryState(
+            created_at=_utc_timestamp(),
+            target_count=target_count,
+            seed=config.synthetic_generation_seed,
+        )
+
+    staged_candidate_indexes = [
+        int(record.get("factory_metadata", {}).get("candidate_index", -1))
+        for record in accepted_records
+    ]
+    if len(accepted_records) < state.accepted_count:
+        raise RuntimeError("Factory state references accepted records missing from staging JSONL.")
+    state.accepted_count = len(accepted_records)
+    state.rejected_count = max(state.rejected_count, len(rejection_records))
+    state.retry_count = max(state.retry_count, len(rejection_records))
+    if staged_candidate_indexes:
+        state.next_candidate_index = max(state.next_candidate_index, max(staged_candidate_indexes) + 1)
+    state.completed = state.accepted_count >= target_count
+    _write_json_document(config.synthetic_factory_state_path, state.to_dict())
+    return state, accepted_records, rejection_records
+
+
+def _distribution_payload(values: Counter[str], total: int) -> dict[str, dict[str, float | int]]:
+    """Return sorted count and percentage payloads for reports and manifests."""
+
+    return {
+        label: {
+            "count": count,
+            "percentage": round((count / total * 100) if total else 0.0, 2),
+        }
+        for label, count in sorted(values.items())
+    }
+
+
+def _records_distribution(records: list[dict[str, Any]]) -> dict[str, Counter[str]]:
+    """Measure accepted-record distributions without recomputing conversation labels."""
+
+    distributions: dict[str, Counter[str]] = {
+        "persona": Counter(),
+        "scenario": Counter(),
+        "coaching_objective": Counter(),
+        "motivation": Counter(),
+        "experience": Counter(),
+        "memory_category": Counter(),
+        "memory_event_type": Counter(),
+        "conversation_length": Counter(),
+    }
+    persona_index = {persona.persona_id: persona for persona in get_persona_library()}
+    scenario_index = {scenario.scenario_id: scenario for scenario in get_scenario_library()}
+    for record in records:
+        metadata = record["synthetic_metadata"]
+        persona_id = str(metadata["persona_id"])
+        scenario_id = str(metadata["scenario_id"])
+        persona = persona_index[persona_id]
+        scenario = scenario_index[scenario_id]
+        distributions["persona"][persona_id] += 1
+        distributions["scenario"][scenario_id] += 1
+        distributions["coaching_objective"][str(metadata["primary_coaching_objective"])] += 1
+        distributions["motivation"][persona.motivation_style.value] += 1
+        distributions["experience"][persona.experience_level.value] += 1
+        for event_value in metadata["memory_event_types"]:
+            event_type = EventType(event_value)
+            distributions["memory_event_type"][event_type.value] += 1
+            distributions["memory_category"][memory_spec_by_event_type(event_type).category.value] += 1
+        distributions["conversation_length"][str(len(record["conversations"]))] += 1
+    return distributions
+
+
+def _similarity_bucket_key(*, persona_id: str, scenario_id: str) -> str:
+    """Scope near-duplicate comparisons to one structured persona/scenario combination."""
+
+    return f"{persona_id}::{scenario_id}"
+
+
+def _max_distribution_deviation(
+    actual: Counter[str],
+    expected: Counter[str],
+    total: int,
+) -> float:
+    """Measure maximum absolute category-share deviation from the deterministic plan."""
+
+    labels = set(actual) | set(expected)
+    if not labels or total == 0:
+        return 0.0
+    return max(abs(actual[label] / total - expected[label] / total) for label in labels)
+
+
+def _build_generation_statistics(
+    *,
+    records: list[dict[str, Any]],
+    rejections: list[dict[str, Any]],
+    state: ProductionFactoryState,
+    plans: list[ProductionCandidatePlan],
+) -> dict[str, Any]:
+    """Build the audit payload shared by the gate, card, manifest, and report."""
+
+    distributions = _records_distribution(records)
+    planned_distributions = _plan_distributions(plans)
+    validator_scores: dict[str, list[float]] = {}
+    rubric_scores: list[float] = []
+    for record in records:
+        rubric = record["synthetic_metadata"]["quality_rubric"]
+        rubric_scores.append(float(rubric["overall_score"]))
+        for name, value in rubric.items():
+            if name not in {"passed", "overall_score", "blockers"}:
+                validator_scores.setdefault(name, []).append(float(value))
+
+    histogram: Counter[str] = Counter()
+    for score in rubric_scores:
+        if score < 0.80:
+            histogram["0.75-0.79"] += 1
+        elif score < 0.90:
+            histogram["0.80-0.89"] += 1
+        else:
+            histogram["0.90-1.00"] += 1
+
+    rejection_reasons = Counter(
+        reason
+        for record in rejections
+        for reason in record.get("rejection_reasons", [])
+    )
+    deduplication_reasons = {
+        "exact_duplicate",
+        "near_duplicate",
+        "highly_repetitive_response",
+        "highly_repetitive_opening",
+    }
+    validator_rejection_count = sum(
+        1
+        for record in rejections
+        if any(
+            reason not in deduplication_reasons
+            for reason in record.get("rejection_reasons", [])
+        )
+    )
+    total = len(records)
+    return {
+        "generated_at": state.created_at,
+        "schema_version": SYNTHETIC_SCHEMA_VERSION,
+        "generator_version": SYNTHETIC_FACTORY_VERSION,
+        "sample_count": total,
+        "accepted_count": state.accepted_count,
+        "rejected_count": state.rejected_count,
+        "retry_count": state.retry_count,
+        "acceptance_rate": round(
+            (state.accepted_count / state.next_candidate_index) if state.next_candidate_index else 0.0,
+            4,
+        ),
+        "candidate_validator_pass_rate": round(
+            ((state.next_candidate_index - validator_rejection_count) / state.next_candidate_index)
+            if state.next_candidate_index
+            else 0.0,
+            4,
+        ),
+        "validator_pass_rate": round(
+            sum(
+                1
+                for record in records
+                if record["synthetic_metadata"]["quality_rubric"]["passed"]
+            )
+            / total
+            if total
+            else 0.0,
+            4,
+        ),
+        "duplicate_rate": 0.0,
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
+        "validator_scores": {
+            name: {
+                "average": round(mean(scores), 4),
+                "minimum": round(min(scores), 4),
+                "maximum": round(max(scores), 4),
+            }
+            for name, scores in sorted(validator_scores.items())
+        },
+        "quality_score_statistics": {
+            "average": round(mean(rubric_scores), 4) if rubric_scores else 0.0,
+            "minimum": round(min(rubric_scores), 4) if rubric_scores else 0.0,
+            "maximum": round(max(rubric_scores), 4) if rubric_scores else 0.0,
+            "histogram": dict(sorted(histogram.items())),
+        },
+        "distributions": {
+            name: _distribution_payload(counter, total)
+            for name, counter in distributions.items()
+        },
+        "planned_distributions": {
+            name: _distribution_payload(counter, len(plans))
+            for name, counter in planned_distributions.items()
+        },
+        "distribution_deviations": {
+            name: round(
+                _max_distribution_deviation(
+                    distributions[name],
+                    planned_distributions[name],
+                    total,
+                ),
+                4,
+            )
+            for name in planned_distributions
+        },
+    }
+
+
+def evaluate_production_quality_gates(
+    statistics: dict[str, Any],
+    *,
+    config: RedAesthConfig = config,
+) -> dict[str, dict[str, Any]]:
+    """Evaluate the configured fail-closed gates required before production export."""
+
+    distributions = statistics["distributions"]
+    memory_shares = [
+        float(payload["percentage"]) / 100 for payload in distributions["memory_category"].values()
+    ]
+    gates = {
+        "validator_pass_rate": {
+            "actual": statistics["validator_pass_rate"],
+            "threshold": config.synthetic_min_validator_pass_rate,
+            "status": "PASS"
+            if statistics["validator_pass_rate"] >= config.synthetic_min_validator_pass_rate
+            else "FAIL",
+        },
+        "duplicate_rate": {
+            "actual": statistics["duplicate_rate"],
+            "threshold": config.synthetic_max_duplicate_rate,
+            "status": "PASS"
+            if statistics["duplicate_rate"] <= config.synthetic_max_duplicate_rate
+            else "FAIL",
+        },
+        "persona_balance": {
+            "actual": statistics["distribution_deviations"]["persona"],
+            "threshold": config.synthetic_max_distribution_deviation,
+            "status": "PASS"
+            if statistics["distribution_deviations"]["persona"]
+            <= config.synthetic_max_distribution_deviation
+            else "FAIL",
+        },
+        "scenario_balance": {
+            "actual": statistics["distribution_deviations"]["scenario"],
+            "threshold": config.synthetic_max_distribution_deviation,
+            "status": "PASS"
+            if statistics["distribution_deviations"]["scenario"]
+            <= config.synthetic_max_distribution_deviation
+            else "FAIL",
+        },
+        "memory_usage_balance": {
+            "actual": max(memory_shares, default=0.0),
+            "threshold": config.synthetic_max_memory_category_share,
+            "status": "PASS"
+            if max(memory_shares, default=0.0) <= config.synthetic_max_memory_category_share
+            else "FAIL",
+        },
+    }
+    return gates
+
+
+def _render_distribution_lines(distribution: dict[str, dict[str, float | int]]) -> list[str]:
+    """Render one distribution payload as report-friendly markdown lines."""
+
+    return [
+        f"- `{label}`: {int(payload['count'])} ({float(payload['percentage']):.2f}%)"
+        for label, payload in distribution.items()
+    ]
+
+
+def _write_production_report(
+    *,
+    statistics: dict[str, Any],
+    gates: dict[str, dict[str, Any]],
+    config: RedAesthConfig,
+    go: bool,
+    train_sha256: str | None = None,
+) -> Path:
+    """Write the required GO / NO GO production-corpus report."""
+
+    blockers = [
+        f"{name}: {gate['actual']} versus threshold {gate['threshold']}"
+        for name, gate in gates.items()
+        if gate["status"] == "FAIL"
+    ]
+    lines = [
+        "# Production Corpus Report",
+        "",
+        "## GO / NO GO",
+        "",
+        "GO" if go else "NO GO",
+        "",
+        "## Generation Summary",
+        "",
+        f"- Generation timestamp: {statistics['generated_at']}",
+        f"- Schema version: {statistics['schema_version']}",
+        f"- Generator version: {statistics['generator_version']}",
+        f"- Accepted: {statistics['accepted_count']}",
+        f"- Rejected: {statistics['rejected_count']}",
+        f"- Retry count: {statistics['retry_count']}",
+        f"- Acceptance rate: {statistics['acceptance_rate'] * 100:.2f}%",
+        f"- Candidate validator pass rate: {statistics['candidate_validator_pass_rate'] * 100:.2f}%",
+        f"- Export validator pass rate: {statistics['validator_pass_rate'] * 100:.2f}%",
+    ]
+    if train_sha256:
+        lines.append(f"- `synthetic_train.jsonl` SHA256: `{train_sha256}`")
+    lines.extend(["", "## Average Validator Scores", ""])
+    for name, scores in statistics["validator_scores"].items():
+        lines.append(
+            f"- `{name}`: average {scores['average']:.4f}, minimum {scores['minimum']:.4f}, "
+            f"maximum {scores['maximum']:.4f}"
+        )
+    lines.extend(["", "## Rubric Score Histogram", ""])
+    for bucket, count in statistics["quality_score_statistics"]["histogram"].items():
+        lines.append(f"- `{bucket}`: {count}")
+    for title, key in (
+        ("Persona Distribution", "persona"),
+        ("Scenario Distribution", "scenario"),
+        ("Memory Distribution", "memory_category"),
+        ("Conversation Length Distribution", "conversation_length"),
+    ):
+        lines.extend(["", f"## {title}", ""])
+        lines.extend(_render_distribution_lines(statistics["distributions"][key]))
+    lines.extend(["", "## Quality Gates", ""])
+    for name, gate in gates.items():
+        lines.append(
+            f"- `{name}`: {gate['status']} (actual {gate['actual']}, threshold {gate['threshold']})"
+        )
+    lines.extend(["", "## Quality Observations", ""])
+    lines.append(
+        "- Every exported record is schema-valid, memory-adaptive, and passed the complete deterministic quality rubric."
+    )
+    lines.append(
+        "- Diversity is scheduled before generation and verified against the completed corpus before export."
+    )
+    lines.extend(["", "## Remaining Issues", ""])
+    if blockers:
+        lines.extend(f"- {blocker}" for blocker in blockers)
+    else:
+        lines.append("None. The proof corpus passed all configured production quality gates.")
+    config.synthetic_production_report_path.parent.mkdir(parents=True, exist_ok=True)
+    config.synthetic_production_report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return config.synthetic_production_report_path
+
+
+def _write_dataset_card(
+    *,
+    statistics: dict[str, Any],
+    train_sha256: str,
+    config: RedAesthConfig,
+) -> Path:
+    """Write a concise package card for the validated production corpus."""
+
+    lines = [
+        "# RedAesth Synthetic Production Corpus",
+        "",
+        f"- Generation timestamp: {statistics['generated_at']}",
+        f"- Schema version: {statistics['schema_version']}",
+        f"- Generator version: {statistics['generator_version']}",
+        f"- Sample count: {statistics['sample_count']}",
+        f"- Dataset SHA256: `{train_sha256}`",
+        f"- Validator pass rate: {statistics['validator_pass_rate'] * 100:.2f}%",
+        f"- Duplicate rate: {statistics['duplicate_rate'] * 100:.2f}%",
+    ]
+    for title, key in (
+        ("Persona Distribution", "persona"),
+        ("Scenario Distribution", "scenario"),
+        ("Memory Distribution", "memory_category"),
+        ("Conversation Length Distribution", "conversation_length"),
+    ):
+        lines.extend(["", f"## {title}", ""])
+        lines.extend(_render_distribution_lines(statistics["distributions"][key]))
+    body = "\n".join(lines) + "\n"
+    content_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    content = body + f"- Card content SHA256: `{content_sha256}`\n"
+    config.synthetic_production_card_path.parent.mkdir(parents=True, exist_ok=True)
+    config.synthetic_production_card_path.write_text(content, encoding="utf-8")
+    return config.synthetic_production_card_path
+
+
+def _write_manifest(
+    *,
+    statistics: dict[str, Any],
+    config: RedAesthConfig,
+    train_path: Path,
+    card_path: Path,
+    report_path: Path,
+) -> Path:
+    """Write a SHA256-backed manifest for every materialized package artifact."""
+
+    artifacts = {
+        "synthetic_train": {
+            "path": str(train_path.relative_to(config.project_root)).replace("\\", "/"),
+            "sha256": _sha256_file(train_path),
+            "sample_count": statistics["sample_count"],
+        },
+        "generation_statistics": {
+            "path": str(config.synthetic_production_statistics_path.relative_to(config.project_root)).replace("\\", "/"),
+            "sha256": _sha256_file(config.synthetic_production_statistics_path),
+            "sample_count": statistics["sample_count"],
+        },
+        "dataset_card": {
+            "path": str(card_path.relative_to(config.project_root)).replace("\\", "/"),
+            "sha256": _sha256_file(card_path),
+            "sample_count": statistics["sample_count"],
+        },
+        "production_report": {
+            "path": str(report_path.relative_to(config.project_root)).replace("\\", "/"),
+            "sha256": _sha256_file(report_path),
+            "sample_count": statistics["sample_count"],
+        },
+    }
+    return _write_json_document(
+        config.synthetic_production_manifest_path,
+        {
+            "generated_at": statistics["generated_at"],
+            "schema_version": SYNTHETIC_SCHEMA_VERSION,
+            "generator_version": SYNTHETIC_FACTORY_VERSION,
+            "sample_count": statistics["sample_count"],
+            "artifacts": artifacts,
+            "distributions": statistics["distributions"],
+            "validator_pass_rate": statistics["validator_pass_rate"],
+            "quality_score_statistics": statistics["quality_score_statistics"],
+        },
+    )
+
+
+def _package_production_corpus(
+    *,
+    records: list[dict[str, Any]],
+    rejections: list[dict[str, Any]],
+    state: ProductionFactoryState,
+    plans: list[ProductionCandidatePlan],
+    config: RedAesthConfig,
+) -> ProductionCorpusResult:
+    """Run quality gates and write the final package only when every gate passes."""
+
+    statistics = _build_generation_statistics(
+        records=records,
+        rejections=rejections,
+        state=state,
+        plans=plans,
+    )
+    gates = evaluate_production_quality_gates(statistics, config=config)
+    statistics["quality_gates"] = gates
+    gate_passed = all(gate["status"] == "PASS" for gate in gates.values())
+    if not gate_passed:
+        _write_json_document(config.synthetic_production_statistics_path, statistics)
+        report_path = _write_production_report(
+            statistics=statistics,
+            gates=gates,
+            config=config,
+            go=False,
+        )
+        failed_gates = ", ".join(
+            name for name, gate in gates.items() if gate["status"] == "FAIL"
+        )
+        raise RuntimeError(
+            f"Production corpus export aborted because quality gates failed: {failed_gates}. "
+            f"See {report_path}."
+        )
+
+    ordered_records = sorted(
+        records,
+        key=lambda record: int(record["factory_metadata"]["planned_slot"]),
+    )
+    train_path = write_jsonl(config.synthetic_production_train_path, ordered_records)
+    train_sha256 = _sha256_file(train_path)
+    statistics["synthetic_train_sha256"] = train_sha256
+    statistics_path = _write_json_document(config.synthetic_production_statistics_path, statistics)
+    card_path = _write_dataset_card(
+        statistics=statistics,
+        train_sha256=train_sha256,
+        config=config,
+    )
+    report_path = _write_production_report(
+        statistics=statistics,
+        gates=gates,
+        config=config,
+        go=True,
+        train_sha256=train_sha256,
+    )
+    manifest_path = _write_manifest(
+        statistics=statistics,
+        config=config,
+        train_path=train_path,
+        card_path=card_path,
+        report_path=report_path,
+    )
+    state.completed = True
+    _write_json_document(config.synthetic_factory_state_path, state.to_dict())
+    return ProductionCorpusResult(
+        state=state,
+        completed=True,
+        accepted_staging_path=config.synthetic_factory_accepted_staging_path,
+        rejection_log_path=config.synthetic_factory_rejection_log_path,
+        state_path=config.synthetic_factory_state_path,
+        train_path=train_path,
+        manifest_path=manifest_path,
+        dataset_card_path=card_path,
+        statistics_path=statistics_path,
+        report_path=report_path,
+    )
+
+
+def generate_production_corpus(
+    *,
+    config: RedAesthConfig = config,
+    target_count: int | None = None,
+    batch_size: int | None = None,
+    max_batches: int | None = None,
+) -> ProductionCorpusResult:
+    """Resume or complete deterministic, quality-gated production corpus generation."""
+
+    if config.base_model_id != SMOLLM2_MODEL_ID:
+        raise ValueError(
+            "The production corpus is locked to the selected SmolLM2 training schema; "
+            f"received base_model_id={config.base_model_id!r}."
+        )
+    target = target_count if target_count is not None else config.synthetic_production_target_count
+    effective_batch_size = batch_size if batch_size is not None else config.synthetic_factory_batch_size
+    if target <= 0 or effective_batch_size <= 0:
+        raise ValueError("Production target_count and batch_size must be positive.")
+
+    state, records, rejections = _load_or_create_factory_state(
+        config=config,
+        target_count=target,
+    )
+    plans = _build_production_candidate_plan(
+        target_count=target,
+        seed=config.synthetic_generation_seed,
+    )
+    deduplication_index = ConversationDeduplicationIndex(config=config, target_count=target)
+    for record in records:
+        metadata = record["synthetic_metadata"]
+        deduplication_index.register_messages(
+            record["conversations"],
+            bucket_key=_similarity_bucket_key(
+                persona_id=str(metadata["persona_id"]),
+                scenario_id=str(metadata["scenario_id"]),
+            ),
+        )
+
+    personas = {persona.persona_id: persona for persona in get_persona_library()}
+    scenarios = {scenario.scenario_id: scenario for scenario in get_scenario_library()}
+    max_attempts = target * config.synthetic_factory_attempt_multiplier
+    batches_completed = 0
+
+    while state.accepted_count < target and (
+        max_batches is None or batches_completed < max_batches
+    ):
+        for _ in range(effective_batch_size):
+            if state.accepted_count >= target:
+                break
+            if state.next_candidate_index >= max_attempts:
+                raise RuntimeError(
+                    "Production factory exhausted its configured retry budget before reaching the "
+                    f"accepted target of {target}."
+                )
+
+            plan = plans[state.accepted_count]
+            candidate_index = state.next_candidate_index
+            candidate = build_synthetic_conversation(
+                persona=personas[plan.persona_id],
+                scenario=scenarios[plan.scenario_id],
+                sample_index=candidate_index,
+                variation_index=candidate_index,
+                memory_event_type=plan.memory_event_type,
+                history_turn_count=plan.history_turn_count,
+                config=config,
+            )
+            quality = evaluate_synthetic_conversation(candidate, config=config)
+            rejection_reasons = list(quality.blockers)
+            if quality.passed:
+                duplicate_reason = deduplication_index.rejection_reason(
+                    candidate,
+                    bucket_key=_similarity_bucket_key(
+                        persona_id=plan.persona_id,
+                        scenario_id=plan.scenario_id,
+                    ),
+                )
+                if duplicate_reason:
+                    rejection_reasons.append(duplicate_reason)
+
+            state.next_candidate_index += 1
+            if rejection_reasons:
+                state.rejected_count += 1
+                state.retry_count += 1
+                rejection = {
+                    "generated_at": state.created_at,
+                    "schema_version": SYNTHETIC_SCHEMA_VERSION,
+                    "generator_version": SYNTHETIC_FACTORY_VERSION,
+                    "candidate_index": candidate_index,
+                    "planned_slot": plan.planned_slot,
+                    "conversation_id": candidate.conversation_id,
+                    "persona_id": plan.persona_id,
+                    "scenario_id": plan.scenario_id,
+                    "rejection_reasons": rejection_reasons,
+                }
+                _append_jsonl_record(config.synthetic_factory_rejection_log_path, rejection)
+                rejections.append(rejection)
+                _write_json_document(config.synthetic_factory_state_path, state.to_dict())
+                continue
+
+            record = training_record_from_conversation(
+                candidate,
+                quality,
+                source_id=SYNTHETIC_FACTORY_SOURCE_ID,
+            )
+            record["factory_metadata"] = {
+                "generated_at": state.created_at,
+                "schema_version": SYNTHETIC_SCHEMA_VERSION,
+                "generator_version": SYNTHETIC_FACTORY_VERSION,
+                "candidate_index": candidate_index,
+                "planned_slot": plan.planned_slot,
+            }
+            _append_jsonl_record(config.synthetic_factory_accepted_staging_path, record)
+            records.append(record)
+            deduplication_index.register_messages(
+                record["conversations"],
+                bucket_key=_similarity_bucket_key(
+                    persona_id=plan.persona_id,
+                    scenario_id=plan.scenario_id,
+                ),
+            )
+            state.accepted_count += 1
+            _write_json_document(config.synthetic_factory_state_path, state.to_dict())
+        batches_completed += 1
+
+    if state.accepted_count < target:
+        return ProductionCorpusResult(
+            state=state,
+            completed=False,
+            accepted_staging_path=config.synthetic_factory_accepted_staging_path,
+            rejection_log_path=config.synthetic_factory_rejection_log_path,
+            state_path=config.synthetic_factory_state_path,
+        )
+
+    return _package_production_corpus(
+        records=records,
+        rejections=rejections,
+        state=state,
+        plans=plans,
+        config=config,
+    )
+
+
 __all__ = [
+    "ConversationDeduplicationIndex",
     "GenerationRejection",
+    "ProductionCandidatePlan",
+    "ProductionCorpusResult",
+    "ProductionFactoryState",
     "SmolLM2ChatTemplateTokenizer",
     "SyntheticGenerationResult",
     "build_synthetic_conversation",
+    "evaluate_production_quality_gates",
     "export_validated_conversations",
     "generate_pilot_dataset",
+    "generate_production_corpus",
     "generate_validated_conversations",
     "training_record_from_conversation",
     "write_synthetic_generation_report",

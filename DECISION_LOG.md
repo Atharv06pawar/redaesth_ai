@@ -98,3 +98,21 @@
 **Justification:** The synthetic framework already establishes the behavioral contract, so the smallest reliable implementation is to generate typed candidates from those existing components and reject any failing candidate automatically. Reusing `build_training_record` preserves the established JSONL contract, while the local SmolLM2 adapter implements the already locked `<|im_start|>...<|im_end|>` tokenizer format offline and deterministically.
 **Impact:** `pipeline/generate_synthetic.py` now emits exactly 100 validated pilot records at `data/synthetic/validated/synthetic_coaching_pilot.jsonl` and `SYNTHETIC_GENERATION_REPORT.md`. The completed run accepted all 100 candidates with no rejections; scale-up remains out of scope until engineering review.
 ---
+
+## Decision 12: Use a resumable, quality-gated synthetic factory for the first LoRA corpus
+**Date:** 2026-07-13T00:50:49+05:30
+**Phase:** Phase 3 - Production Synthetic Corpus
+**Decision:** Extend the existing deterministic synthetic generator in place into a batch-capable production factory. The factory checkpoints accepted and rejected candidates separately, resumes from durable staging state, preserves deterministic persona/scenario/memory/length quotas, rejects duplicate candidates, and refuses final export when configured quality gates fail.
+**Alternatives Considered:** Generate one monolithic corpus without recovery state; manually rebalance or review failed samples; export before validation and repair the corpus afterward; introduce a separate generation architecture.
+**Justification:** The real-world corpus remains unsuitable as the primary behavioral training source, while the completed synthetic framework already defines and validates coaching quality. Persisted staging makes long runs recoverable without regenerating accepted rows; gate-controlled packaging ensures that only a complete, balanced, deduplicated, rubric-passing corpus reaches the LoRA-ready artifact.
+**Impact:** The proof factory produced `250` accepted records, logged `2` near-duplicate rejections and `2` retries, and emitted `data/synthetic/production/synthetic_train.jsonl` with SHA-256 `e77ca4178f2225c6b66fa14e55da516a909eed89d8d102a5a784a57494689410`. All five production gates passed, and the package includes a manifest, dataset card, statistics, checkpoint state, rejection log, and `PRODUCTION_CORPUS_REPORT.md`. The next engineering action is executing the first calibration LoRA run; corpus-generation scale-up is intentionally deferred.
+---
+
+## Decision 13: Use typed QLoRA calibration infrastructure with an immutable corpus holdout
+**Date:** 2026-07-13T23:54:00+05:30
+**Phase:** Phase 4 - Calibration Training Infrastructure
+**Decision:** Add a `training/` package that uses the existing typed configuration and the locked `HuggingFaceTB/SmolLM2-1.7B-Instruct` selection to run a one-epoch 4-bit QLoRA calibration job. The package validates every production JSONL record against the selected tokenizer's chat template, creates a seeded in-memory 90/10 holdout without changing the corpus, resumes standard Trainer checkpoints, exports adapter-only artifacts, and provides a zero-edit Kaggle launcher.
+**Alternatives Considered:** Add a second training configuration format; mutate the proof corpus to create a validation file; use an unvalidated text loader; build a separate model-specific training path; perform GGUF conversion during calibration.
+**Justification:** The existing synthetic proof corpus is already quality-gated and hashed, so the training layer should preserve its immutability and reuse its schema rather than create another dataset contract. Configuration-owned QLoRA parameters, paged 8-bit optimizer state, 4-bit NF4 loading, gradient checkpointing, and deterministic checkpoint recovery give Kaggle T4-class hardware an executable and recoverable calibration route. Adapter-only export deliberately keeps GGUF conversion outside this milestone.
+**Impact:** `python training/train.py` and `python training/kaggle_launcher.py` are ready to execute the first calibration run after `training/kaggle_requirements.txt` is installed. No dataset was changed, no checkpoint was created, and no model training was executed while building this infrastructure. Actual run artifacts will be produced only by the launcher.
+---

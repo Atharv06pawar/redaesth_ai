@@ -6,7 +6,11 @@ from .dataset_pipeline import download_approved_datasets, load_approved_datasets
 from .final_dataset import build_final_dataset
 from .scoring import score_cleaned_dataset
 from .synthetic_memory import get_memory_event_specifications, validate_memory_specifications
-from .synthetic_generator import generate_pilot_dataset, generate_validated_conversations
+from .synthetic_generator import (
+    generate_pilot_dataset,
+    generate_production_corpus,
+    generate_validated_conversations,
+)
 from .synthetic_personas import get_persona_library, validate_persona_library
 from .synthetic_rubric import evaluate_synthetic_conversation, synthetic_quality_contract
 from .synthetic_scenarios import get_scenario_library, validate_scenario_library
@@ -18,6 +22,7 @@ __all__ = [
     "config",
     "evaluate_synthetic_conversation",
     "generate_pilot_dataset",
+    "generate_production_corpus",
     "generate_validated_conversations",
     "get_memory_event_specifications",
     "get_persona_library",

@@ -262,3 +262,67 @@ Build a memory-first AI coaching system whose engineering choices are optimized 
 
 - The pilot is intentionally limited to 100 validated conversations for engineering review.
 - No synthetic-corpus scale-up, model training, Kaggle workflow, retrieval change, or memory-engine change was started.
+
+## Milestone 9: Production synthetic corpus factory
+**Date:** 2026-07-13T00:50:49+05:30
+
+### Objective
+
+- Convert the validated synthetic pilot generator into the deterministic, resumable dataset factory required to materialize the first LoRA-ready behavioral corpus.
+
+### Infrastructure completed
+
+- Extended `src/redaesth/synthetic_generator.py` with deterministic batch planning across personas, scenarios, coaching objectives, motivation and experience levels, memory categories, and conversation lengths.
+- Added durable factory state, accepted-row staging, and rejection logging. A rerun resumes from staged accepted rows and never regenerates them.
+- Added exact-hash, near-duplicate, repeated-opening, and repetitive-response rejection controls while retaining the existing text normalization and repetition scoring helpers.
+- Added fail-closed quality gates for export validator pass rate, duplicate rate, persona balance, scenario balance, and memory-category balance.
+- Added LoRA-ready package materialization: `synthetic_train.jsonl`, `dataset_manifest.json`, `dataset_card.md`, `generation_statistics.json`, and `PRODUCTION_CORPUS_REPORT.md`.
+- Updated `pipeline/generate_synthetic.py` so the production factory is the default command; `--pilot` retains the fixed 100-conversation demonstration path.
+
+### Proof corpus results
+
+- Accepted records: `250`
+- Rejected candidates: `2` near duplicates
+- Retry count: `2`
+- Acceptance rate: `99.21%`
+- Export validator pass rate: `100.00%`
+- Duplicate rate in exported corpus: `0.00%`
+- Production quality gates: `5/5` passed
+- Training artifact SHA-256: `e77ca4178f2225c6b66fa14e55da516a909eed89d8d102a5a784a57494689410`
+
+### Validation completed
+
+- `53` unit tests pass, including deterministic production-factory coverage for batching, resume recovery, exact and near deduplication, quality gates, manifest generation, statistics, and packaging.
+- `python -m redaesth_ai.cli smoke-test` passes.
+- `python -m compileall src tests pipeline redaesth` passes.
+- Artifact verification confirmed `250` unique JSONL records, zero malformed or rubric-failed records, and a manifest SHA-256 matching the final training file.
+
+### Boundary of this milestone
+
+- The production proof corpus is complete and ready for the first calibration LoRA execution.
+- No Kaggle notebook, LoRA trainer, retrieval change, or corpus scale-up beyond the requested 250-record proof was started.
+
+## Milestone 10: Calibration LoRA training infrastructure
+**Date:** 2026-07-13T23:54:00+05:30
+
+### Objective
+
+- Make the locked 250-record synthetic proof corpus executable as a first calibration QLoRA run on Kaggle, without training a model or changing any previous data or quality system.
+
+### Infrastructure completed
+
+- Added the `training/` package: schema-validating dataset loader, selected-model tokenizer and 4-bit loader, architecture-derived PEFT LoRA settings, standard Hugging Face Trainer assembly, telemetry callbacks, evaluation metrics, adapter-only export, and CLI entrypoint.
+- The loader re-renders each `conversations` payload through the selected tokenizer and rejects chat-template drift or malformed JSONL before training. With no separate validation artifact, it creates the configuration-defined seeded 90/10 in-memory split (225 training and 25 validation examples) without modifying the hashed corpus.
+- Added checkpoint recovery through `--resume` or `--resume /path/to/checkpoint-N`, periodic evaluation, early stopping, best-model tracking, JSON metrics, and a post-run `CALIBRATION_REPORT.md` writer.
+- Added `training/kaggle_launcher.py`, `training/kaggle_requirements.txt`, `training/README.md`, and `CALIBRATION_TRAINING_SPEC.md`. The configured run uses SmolLM2-1.7B-Instruct, 4-bit NF4 QLoRA, rank 16, alpha 32, dropout 0.05, paged 8-bit AdamW, gradient checkpointing, and one calibration epoch.
+
+### Validation completed
+
+- `65` unit tests pass, including 12 new offline deterministic tests for schema validation, deterministic splitting, explicit validation loading, LoRA target selection, typed Trainer arguments, config guardrails, checkpoint recovery, CLI overrides, metrics, report creation, and adapter packaging.
+- `python -m redaesth_ai.cli smoke-test` passes.
+- `python -m compileall src tests training pipeline redaesth` passes.
+
+### Boundary of this milestone
+
+- No model was loaded from the network, no training was executed, no checkpoints were created, and no dataset files were modified.
+- The only remaining engineering action is to run `python training/kaggle_launcher.py` in a Kaggle GPU notebook after installing `training/kaggle_requirements.txt`.

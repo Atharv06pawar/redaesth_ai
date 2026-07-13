@@ -76,7 +76,7 @@ class RedAesthConfig(BaseSettings):
     learning_rate: float = 2e-4
     lr_scheduler_type: str = "cosine"
     warmup_ratio: float = 0.05
-    num_train_epochs: int = 3
+    num_train_epochs: int = 1
     per_device_train_batch_size: int = 2
     gradient_accumulation_steps: int = 4
     seed: int = 42
@@ -110,6 +110,36 @@ class RedAesthConfig(BaseSettings):
         "data/synthetic/validated/synthetic_coaching_pilot.jsonl"
     )
     synthetic_generation_report_path: Path = Path("SYNTHETIC_GENERATION_REPORT.md")
+    synthetic_production_dir: Path = Path("data/synthetic/production")
+    synthetic_production_train_path: Path = Path(
+        "data/synthetic/production/synthetic_train.jsonl"
+    )
+    synthetic_production_manifest_path: Path = Path(
+        "data/synthetic/production/dataset_manifest.json"
+    )
+    synthetic_production_card_path: Path = Path("data/synthetic/production/dataset_card.md")
+    synthetic_production_statistics_path: Path = Path(
+        "data/synthetic/production/generation_statistics.json"
+    )
+    synthetic_factory_state_path: Path = Path("data/synthetic/production/factory_state.json")
+    synthetic_factory_accepted_staging_path: Path = Path(
+        "data/synthetic/production/accepted_staging.jsonl"
+    )
+    synthetic_factory_rejection_log_path: Path = Path(
+        "data/synthetic/production/rejections.jsonl"
+    )
+    synthetic_production_report_path: Path = Path("PRODUCTION_CORPUS_REPORT.md")
+    calibration_train_path: Path = Path("data/synthetic/production/synthetic_train.jsonl")
+    calibration_validation_path: Path | None = None
+    calibration_output_dir: Path = Path("training/outputs/calibration_lora_run")
+    calibration_adapter_dir: Path = Path("training/outputs/calibration_lora_run/adapter")
+    calibration_metrics_path: Path = Path(
+        "training/outputs/calibration_lora_run/calibration_metrics.json"
+    )
+    calibration_checkpoint_metadata_path: Path = Path(
+        "training/outputs/calibration_lora_run/checkpoint_metadata.json"
+    )
+    calibration_report_path: Path = Path("CALIBRATION_REPORT.md")
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -132,8 +162,32 @@ class RedAesthConfig(BaseSettings):
     synthetic_target_count: int = 8000
     synthetic_pilot_target_count: int = 100
     synthetic_generation_seed: int = 20260710
+    synthetic_production_target_count: int = 250
+    synthetic_factory_batch_size: int = 50
+    synthetic_factory_attempt_multiplier: int = 20
+    synthetic_min_validator_pass_rate: float = 1.0
+    synthetic_max_duplicate_rate: float = 0.0
+    synthetic_max_distribution_deviation: float = 0.01
+    synthetic_max_memory_category_share: float = 0.40
+    synthetic_max_conversation_length_share: float = 0.50
+    synthetic_near_duplicate_similarity: float = 0.92
+    synthetic_max_repeated_opening_share: float = 0.08
     synthetic_quality_threshold: float = 0.75
     generation_batch_size: int = 20
+    calibration_validation_holdout_ratio: float = 0.10
+    calibration_logging_steps: int = 10
+    calibration_eval_steps: int = 10
+    calibration_save_steps: int = 10
+    calibration_save_total_limit: int = 2
+    calibration_early_stopping_patience: int = 3
+    calibration_dataloader_num_workers: int = 2
+    calibration_fp16: bool = True
+    calibration_bf16: bool = False
+    calibration_gradient_checkpointing: bool = True
+    calibration_device_map: str = "auto"
+    calibration_optimizer: str = "paged_adamw_8bit"
+    lora_bias: str = "none"
+    lora_task_type: str = "CAUSAL_LM"
     synthetic_min_empathy_score: float = 0.70
     synthetic_min_coaching_quality_score: float = 0.70
     synthetic_min_personalization_score: float = 0.70
@@ -205,6 +259,35 @@ class RedAesthConfig(BaseSettings):
         self.synthetic_dataset_specification_path = self.resolve_path(self.synthetic_dataset_specification_path)
         self.synthetic_pilot_dataset_path = self.resolve_path(self.synthetic_pilot_dataset_path)
         self.synthetic_generation_report_path = self.resolve_path(self.synthetic_generation_report_path)
+        self.synthetic_production_dir = self.resolve_path(self.synthetic_production_dir)
+        self.synthetic_production_train_path = self.resolve_path(self.synthetic_production_train_path)
+        self.synthetic_production_manifest_path = self.resolve_path(
+            self.synthetic_production_manifest_path
+        )
+        self.synthetic_production_card_path = self.resolve_path(self.synthetic_production_card_path)
+        self.synthetic_production_statistics_path = self.resolve_path(
+            self.synthetic_production_statistics_path
+        )
+        self.synthetic_factory_state_path = self.resolve_path(self.synthetic_factory_state_path)
+        self.synthetic_factory_accepted_staging_path = self.resolve_path(
+            self.synthetic_factory_accepted_staging_path
+        )
+        self.synthetic_factory_rejection_log_path = self.resolve_path(
+            self.synthetic_factory_rejection_log_path
+        )
+        self.synthetic_production_report_path = self.resolve_path(
+            self.synthetic_production_report_path
+        )
+        self.calibration_train_path = self.resolve_path(self.calibration_train_path)
+        if self.calibration_validation_path is not None:
+            self.calibration_validation_path = self.resolve_path(self.calibration_validation_path)
+        self.calibration_output_dir = self.resolve_path(self.calibration_output_dir)
+        self.calibration_adapter_dir = self.resolve_path(self.calibration_adapter_dir)
+        self.calibration_metrics_path = self.resolve_path(self.calibration_metrics_path)
+        self.calibration_checkpoint_metadata_path = self.resolve_path(
+            self.calibration_checkpoint_metadata_path
+        )
+        self.calibration_report_path = self.resolve_path(self.calibration_report_path)
 
         total_ratio = self.final_train_ratio + self.final_validation_ratio + self.final_test_ratio
         if abs(total_ratio - 1.0) > 1e-6:
@@ -213,6 +296,22 @@ class RedAesthConfig(BaseSettings):
                 f"received train={self.final_train_ratio}, "
                 f"validation={self.final_validation_ratio}, test={self.final_test_ratio}"
             )
+        if not 0.0 < self.calibration_validation_holdout_ratio < 1.0:
+            raise ValueError("Calibration validation holdout ratio must be between zero and one")
+        if self.calibration_fp16 and self.calibration_bf16:
+            raise ValueError("Calibration cannot enable both fp16 and bf16")
+        if self.calibration_logging_steps <= 0:
+            raise ValueError("Calibration logging steps must be positive")
+        if self.calibration_eval_steps <= 0 or self.calibration_save_steps <= 0:
+            raise ValueError("Calibration evaluation and save steps must be positive")
+        if self.calibration_eval_steps != self.calibration_save_steps:
+            raise ValueError(
+                "Calibration evaluation and save steps must match when loading the best model"
+            )
+        if self.calibration_save_total_limit < 1:
+            raise ValueError("Calibration save total limit must be at least one")
+        if self.calibration_early_stopping_patience < 1:
+            raise ValueError("Calibration early stopping patience must be at least one")
 
     def resolve_path(self, path: Path) -> Path:
         """Resolve a possibly relative path against the project root."""
